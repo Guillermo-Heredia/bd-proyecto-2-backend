@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Turbinas: Amplify + CloudFront + EC2 FastAPI + RDS PostgreSQL"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: turbinas
+    MinLength: 3
+    MaxLength: 20
+    AllowedPattern: "^[a-z][a-z0-9-]{2,19}$"
+    ConstraintDescription: "Minúsculas, números y guiones; debe empezar con letra."
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "VPC existente (normalmente la default)."
+
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Subred para la EC2."
+
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Segunda subred para RDS; debe estar en otra AZ."
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Key pair existente para SSH."
+
+  SshAllowedCidr:
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: "^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(/([0-9]|[12][0-9]|3[0-2]))$"
+    Description: "Tu IP pública en formato CIDR, por ejemplo 190.20.10.5/32."
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: "Instance profile existente del Learner Lab."
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  RepoUrl:
+    Type: String
+    Default: https://github.com/Guillermo-Heredia/bd-proyecto-2-backend.git
+    AllowedPattern: "^https://[A-Za-z0-9._/-]+\\.git$"
+
+  RepoBranch:
+    Type: String
+    Default: main
+    AllowedPattern: "^[A-Za-z0-9._/-]+$"
+
+  DbName:
+    Type: String
+    Default: turbinas
+    MinLength: 3
+    MaxLength: 30
+    AllowedPattern: "^[a-z][a-z0-9]{2,29}$"
+
+  DbMasterUsername:
+    Type: String
+    Default: postgres
+    MinLength: 3
+    MaxLength: 30
+    AllowedPattern: "^[A-Za-z][A-Za-z0-9_]{2,29}$"
+
+  DbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: "^[A-Za-z0-9._-]{8,41}$"
+
+  AppDbPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: "^[A-Za-z0-9._-]{8,41}$"
+
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+    MaxValue: 100
+
+  DbEngineVersion:
+    Type: String
+    Default: "16"
+    AllowedPattern: "^16(\\.[0-9]+)?$"
+
+  RestoreDatabase:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+  CorsOrigins:
+    Type: String
+    Default: "*"
+    AllowedPattern: "^[A-Za-z0-9*,.:/_-]*$"
+
+  CloudFrontPriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+
+Mappings:
+  CloudFrontPrefixList:
+    us-east-1:
+      Id: pl-3b927c52
+    us-east-2:
+      Id: pl-b6a144df
+    us-west-1:
+      Id: pl-4ea04527
+    us-west-2:
+      Id: pl-82a045eb
+    ca-central-1:
+      Id: pl-38a64351
+    eu-west-1:
+      Id: pl-4fa04526
+    eu-west-2:
+      Id: pl-93a247fa
+    eu-west-3:
+      Id: pl-75b1541c
+    eu-central-1:
+      Id: pl-a3a144ca
+    eu-north-1:
+      Id: pl-fab65393
+    ap-south-1:
+      Id: pl-9aa247f3
+    ap-southeast-1:
+      Id: pl-31a34658
+    ap-southeast-2:
+      Id: pl-b8a742d1
+    ap-northeast-1:
+      Id: pl-58a04531
+    ap-northeast-2:
+      Id: pl-22a6434b
+    sa-east-1:
+      Id: pl-5da64334
+
+Resources:
+  ApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} FastAPI"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: SSH
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SshAllowedCidr
+        - Description: CloudFront to FastAPI
+          IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourcePrefixListId: !FindInMap
+            - CloudFrontPrefixList
+            - !Ref AWS::Region
+            - Id
+      SecurityGroupEgress:
+        - Description: Outbound
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-api-sg"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} PostgreSQL"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: PostgreSQL from FastAPI
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !GetAtt ApiSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-rds-sg"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName} subnets"
+      SubnetIds:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-db"
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      StorageType: gp2
+      StorageEncrypted: true
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbMasterUsername
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt RdsSecurityGroup.GroupId
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DeletionProtection: false
+      EnablePerformanceInsights: false
+      MonitoringInterval: 0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-db"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ApiInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfileName
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetA
+          GroupSet:
+            - !GetAtt ApiSecurityGroup.GroupId
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee -a /var/log/turbinas-bootstrap.log) 2>&1
+
+          dnf install -y git
+
+          REPO_URL='${RepoUrl}'
+          REPO_BRANCH='${RepoBranch}'
+          DB_HOST='${Database.Endpoint.Address}'
+          DB_PORT='${Database.Endpoint.Port}'
+          DB_NAME='${DbName}'
+          DB_MASTER_USER='${DbMasterUsername}'
+          DB_PASSWORD='${DbPassword}'
+          APP_DB_USER='app_turbinas'
+          APP_DB_PASSWORD='${AppDbPassword}'
+          CORS_ORIGINS='${CorsOrigins}'
+          RESTORE_DATABASE='${RestoreDatabase}'
+          PROJECT_NAME='${ProjectName}'
+
+          export REPO_URL REPO_BRANCH DB_HOST DB_PORT DB_NAME DB_MASTER_USER
+          export DB_PASSWORD APP_DB_USER APP_DB_PASSWORD CORS_ORIGINS
+          export RESTORE_DATABASE PROJECT_NAME
+
+          rm -rf /opt/turbinas
+          git clone --branch "$REPO_BRANCH" "$REPO_URL" /opt/turbinas
+          bash /opt/turbinas/infra/bootstrap.sh
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-api"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-api-eip"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ElasticIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      InstanceId: !Ref ApiInstance
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: ElasticIPAssociation
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${ProjectName} API"
+        HttpVersion: http2
+        IPV6Enabled: true
+        PriceClass: !Ref CloudFrontPriceClass
+        Origins:
+          - Id: api-origin
+            DomainName: !GetAtt ApiInstance.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 8000
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              IpAddressType: ipv4
+        DefaultCacheBehavior:
+          TargetOriginId: api-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+          Compress: true
+
+Outputs:
+  ApiBase:
+    Description: "URL HTTPS del API"
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+
+  ApiHealth:
+    Description: "Health check por CloudFront"
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}/api/health"
+
+  ApiDnsName:
+    Description: "DNS público de la EC2"
+    Value: !GetAtt ApiInstance.PublicDnsName
+
+  ElasticIP:
+    Description: "IP pública de la EC2"
+    Value: !GetAtt ElasticIP.PublicIp
+
+  RdsEndpoint:
+    Description: "Endpoint de RDS"
+    Value: !GetAtt Database.Endpoint.Address
+
+  RdsPort:
+    Description: "Puerto de RDS"
+    Value: !GetAtt Database.Endpoint.Port
+
+  SshCommand:
+    Description: "Comando SSH"
+    Value: !Sub "ssh -i <tu-llave>.pem ec2-user@${ElasticIP.PublicIp}"
