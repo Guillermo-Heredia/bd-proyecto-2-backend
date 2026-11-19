@@ -286,7 +286,7 @@ Resources:
     Properties:
       ApiId: !Ref HttpApi
       IntegrationType: HTTP_PROXY
-      IntegrationUri: !Sub "http://${ElasticIP.PublicIp}:8000/{proxy}"
+      IntegrationUri: !Sub "http://${ElasticIP.PublicIp}:8000"
       IntegrationMethod: ANY
       PayloadFormatVersion: "1.0"
       TimeoutInMillis: 30000
