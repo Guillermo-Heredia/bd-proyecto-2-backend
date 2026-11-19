@@ -6,7 +6,7 @@ Arquitectura:
 Amplify (React, HTTPS)
         |
         v
-CloudFront (HTTPS)
+API Gateway (HTTPS, HTTP API)
         |
         v
 EC2 t3.micro (FastAPI + Uvicorn :8000, systemd)
@@ -58,9 +58,9 @@ Las contraseñas deben usar solo letras, números, punto, guion o guion bajo
 |---|---|
 | EC2 | Amazon Linux 2023, `t3.micro`, 20 GB gp3, Elastic IP, `LabInstanceProfile`. |
 | RDS | PostgreSQL 16, `db.t3.micro`, 20 GB gp2, sin Multi-AZ, sin acceso público. |
-| Security Group API | SSH desde tu IP; puerto 8000 solo desde CloudFront. |
+| Security Group API | SSH desde tu IP; puerto 8000 abierto para API Gateway. |
 | Security Group RDS | 5432 solo desde el Security Group de la EC2. |
-| CloudFront | HTTPS del API, sin caché, todos los métodos necesarios. |
+| API Gateway | HTTP API con proxy a la EC2; entrega HTTPS y reenvía todos los métodos. |
 | User data | Instala Python 3.11, clona el repo, crea el venv, restaura el dump y arranca `turbinas-api`. |
 
 ## 3. Parámetros
@@ -92,7 +92,7 @@ accesible desde cualquier origen; para la demo funciona, pero no es lo ideal.
 5. No se necesitan capabilities de IAM: el stack solo referencia un instance
    profile existente.
 6. Espera a que el stack llegue a `CREATE_COMPLETE`. RDS tarda varios minutos;
-   CloudFront también.
+   API Gateway también.
 
 ## 5. Desplegar con AWS CLI
 
@@ -125,7 +125,7 @@ consola es más seguro para el laboratorio.
 
 En **Outputs** del stack:
 
-- `ApiBase`: URL HTTPS de CloudFront.
+- `ApiBase`: URL HTTPS de API Gateway.
 - `ApiHealth`: URL completa del health check.
 - `ElasticIP`: IP pública de la EC2.
 - `RdsEndpoint`: endpoint de RDS.
@@ -134,7 +134,7 @@ En **Outputs** del stack:
 Prueba:
 
 ```bash
-curl -i https://dxxxxxxxxxxxx.cloudfront.net/api/health
+curl -i https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/api/health
 ```
 
 Debe responder `{"ok":true,...}` con la base `turbinas`.
@@ -154,7 +154,7 @@ sudo journalctl -u turbinas-api -n 80 --no-pager
 curl http://127.0.0.1:8000/api/health
 ```
 
-Si CloudFront aún no está listo, usa un túnel SSH para probar el API directo:
+Si API Gateway aún no responde, usa un túnel SSH para probar el API directo:
 
 ```bash
 ssh -i tu-llave.pem -L 8000:127.0.0.1:8000 ec2-user@<ElasticIP>
@@ -177,8 +177,8 @@ El resultado esperado es `991610`.
 Prueba las consultas y una orden:
 
 ```bash
-curl -s https://dxxxxxxxxxxxx.cloudfront.net/api/analitica/c1?limit=5
-curl -s https://dxxxxxxxxxxxx.cloudfront.net/api/analitica/c3
+curl -s https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/api/analitica/c1?limit=5
+curl -s https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/api/analitica/c3
 ```
 
 En la web, crea una orden desde una alerta y ciérrala. Esto valida los permisos
@@ -211,7 +211,7 @@ En la consola de Amplify:
 2. Agrega la variable de entorno:
 
    ```text
-   VITE_API_URL=https://dxxxxxxxxxxxx.cloudfront.net
+   VITE_API_URL=https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com
    ```
 
 3. Configura el rewrite de React Router:
@@ -237,15 +237,21 @@ En la consola de Amplify:
    Para la primera demo se puede dejar `*`.
 
 Si Amplify no está disponible en el Learner Lab, publica el `dist` del repo
-frontend en S3 + CloudFront. El API no cambia.
+frontend como sitio estático en S3 (sin CloudFront). El API sigue en API Gateway
+y no cambia.
 
 ## 8. Restauración manual
 
 El bootstrap restaura automáticamente cuando `RestoreDatabase=true`. Si falla,
-revisa el log y vuelve a ejecutarlo:
+revisa el log. No ejecutes `bootstrap.sh` a ciegas: necesita las variables del
+user data (`DB_HOST`, `DB_PASSWORD`, `APP_DB_PASSWORD`, etc.), que no quedan
+guardadas en un archivo aparte.
+
+Si el fallo fue transitorio, lo más simple es eliminar y volver a crear el
+stack, o reiniciar la instancia desde CloudFormation. Revisa primero:
 
 ```bash
-sudo bash /opt/turbinas/infra/bootstrap.sh
+sudo tail -n 100 /var/log/turbinas-bootstrap.log
 ```
 
 También puedes hacerlo a mano desde la EC2:
@@ -289,22 +295,23 @@ GRANT EXECUTE ON PROCEDURE sp_cerrar_orden(bigint) TO app_turbinas;
 
 | Síntoma | Causa | Solución |
 |---|---|---|
-| CloudFront 502 | API caída o puerto incorrecto | `systemctl status turbinas-api`; `curl 127.0.0.1:8000/api/health`. |
-| CloudFront 504 | Consulta lenta o API colgada | Revisar `journalctl`; C3 puede tardar ~5 s. |
+| API Gateway 502 | API caída o puerto incorrecto | `systemctl status turbinas-api`; `curl 127.0.0.1:8000/api/health`. |
+| API Gateway 504 | Consulta lenta o API colgada | Revisar `journalctl`; C3 puede tardar ~5 s. |
 | 403/CORS en Amplify | Origen no permitido | `CORS_ORIGINS=https://main.xxx.amplifyapp.com` y reiniciar. |
 | 404 al recargar una ruta | Falta rewrite SPA | Regla `/<*>` → `/index.html` 200. |
 | `password authentication failed` | Contraseña o usuario | Revisar `.env`; el usuario de la app es `app_turbinas`. |
 | `connection refused` a RDS | SG, endpoint o subredes | RDS debe aceptar 5432 desde el SG de la EC2. |
 | `permission denied for procedure sp_cerrar_orden` | Faltan grants | Ejecutar el bloque SQL de la sección 8. |
 | RDS no crea el subnet group | Subredes en la misma AZ | Elegir `SubnetA` y `SubnetB` en AZs distintas. |
-| Error con `SourcePrefixListId` | Región sin mapping | Editar `CloudFrontPrefixList` en el YAML o usar `us-east-1`. |
+| `AccessDenied` al crear CloudFront | El rol del Learner Lab no permite CloudFront | Usar este template con API Gateway; no crear CloudFront. |
+| `AccessDenied` al crear API Gateway | El rol del Learner Lab tampoco permite API Gateway | Pedir al instructor que lo habilite o usar la opción HTTP directo a la EC2. |
 | `LabRole` no se adjunta | Es un rol, no un profile | Usar `LabInstanceProfile`. |
-| La EC2 no tiene el código | `web/` no está en GitHub | Hacer commit y push antes de crear el stack. |
+| La EC2 no tiene el código | El repo backend no está en GitHub | Hacer commit y push antes de crear el stack. |
 
 ## 10. Eliminar
 
 Desde CloudFormation, elimina el stack `turbinas`. Se borran la EC2, la Elastic
-IP, RDS y CloudFront. RDS no crea snapshot final; si necesitas conservar datos:
+IP, RDS y API Gateway. RDS no crea snapshot final; si necesitas conservar datos:
 
 ```bash
 pg_dump -h "$RDSHOST" -U postgres -d turbinas -Fc -f respaldo.dump
@@ -313,8 +320,9 @@ pg_dump -h "$RDSHOST" -U postgres -d turbinas -Fc -f respaldo.dump
 ## 11. Notas de seguridad
 
 - RDS no tiene IP pública y solo acepta conexiones desde la EC2.
-- La EC2 no acepta el puerto 8000 desde internet: solo desde la prefix list de
-  CloudFront.
+- La EC2 acepta el puerto 8000 desde `0.0.0.0/0` porque API Gateway usa IPs
+  dinámicas. Para producción, restringe ese puerto a los rangos de API Gateway
+  o usa un VPC Link con NLB.
 - SSH está limitado a `SshAllowedCidr`.
 - `app_turbinas` solo puede leer tablas y ejecutar los dos procedimientos.
 - `PGSSLMODE=require` en la conexión FastAPI → RDS.

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Turbinas: Amplify + CloudFront + EC2 FastAPI + RDS PostgreSQL"
+Description: "Turbinas: Amplify + API Gateway + EC2 FastAPI + RDS PostgreSQL"
 
 Parameters:
   ProjectName:
@@ -117,49 +117,6 @@ Parameters:
     Default: "*"
     AllowedPattern: "^[A-Za-z0-9*,.:/_-]*$"
 
-  CloudFrontPriceClass:
-    Type: String
-    Default: PriceClass_100
-    AllowedValues:
-      - PriceClass_100
-      - PriceClass_200
-      - PriceClass_All
-
-Mappings:
-  CloudFrontPrefixList:
-    us-east-1:
-      Id: pl-3b927c52
-    us-east-2:
-      Id: pl-b6a144df
-    us-west-1:
-      Id: pl-4ea04527
-    us-west-2:
-      Id: pl-82a045eb
-    ca-central-1:
-      Id: pl-38a64351
-    eu-west-1:
-      Id: pl-4fa04526
-    eu-west-2:
-      Id: pl-93a247fa
-    eu-west-3:
-      Id: pl-75b1541c
-    eu-central-1:
-      Id: pl-a3a144ca
-    eu-north-1:
-      Id: pl-fab65393
-    ap-south-1:
-      Id: pl-9aa247f3
-    ap-southeast-1:
-      Id: pl-31a34658
-    ap-southeast-2:
-      Id: pl-b8a742d1
-    ap-northeast-1:
-      Id: pl-58a04531
-    ap-northeast-2:
-      Id: pl-22a6434b
-    sa-east-1:
-      Id: pl-5da64334
-
 Resources:
   ApiSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -172,14 +129,11 @@ Resources:
           FromPort: 22
           ToPort: 22
           CidrIp: !Ref SshAllowedCidr
-        - Description: CloudFront to FastAPI
+        - Description: API Gateway to FastAPI
           IpProtocol: tcp
           FromPort: 8000
           ToPort: 8000
-          SourcePrefixListId: !FindInMap
-            - CloudFrontPrefixList
-            - !Ref AWS::Region
-            - Id
+          CidrIp: 0.0.0.0/0
       SecurityGroupEgress:
         - Description: Outbound
           IpProtocol: "-1"
@@ -320,52 +274,46 @@ Resources:
       AllocationId: !GetAtt ElasticIP.AllocationId
       InstanceId: !Ref ApiInstance
 
-  CloudFrontDistribution:
-    Type: AWS::CloudFront::Distribution
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${ProjectName}-http-api"
+      ProtocolType: HTTP
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
     DependsOn: ElasticIPAssociation
     Properties:
-      DistributionConfig:
-        Enabled: true
-        Comment: !Sub "${ProjectName} API"
-        HttpVersion: http2
-        IPV6Enabled: true
-        PriceClass: !Ref CloudFrontPriceClass
-        Origins:
-          - Id: api-origin
-            DomainName: !GetAtt ApiInstance.PublicDnsName
-            CustomOriginConfig:
-              HTTPPort: 8000
-              HTTPSPort: 443
-              OriginProtocolPolicy: http-only
-              OriginSSLProtocols:
-                - TLSv1.2
-              IpAddressType: ipv4
-        DefaultCacheBehavior:
-          TargetOriginId: api-origin
-          ViewerProtocolPolicy: redirect-to-https
-          AllowedMethods:
-            - GET
-            - HEAD
-            - OPTIONS
-            - PUT
-            - POST
-            - PATCH
-            - DELETE
-          CachedMethods:
-            - GET
-            - HEAD
-          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
-          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
-          Compress: true
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationUri: !Sub "http://${ElasticIP.PublicIp}:8000/{proxy}"
+      IntegrationMethod: ANY
+      PayloadFormatVersion: "1.0"
+      TimeoutInMillis: 30000
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "$default"
+      Target: !Sub "integrations/${HttpApiIntegration}"
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn: HttpApiRoute
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
 
 Outputs:
   ApiBase:
-    Description: "URL HTTPS del API"
-    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+    Description: "URL HTTPS del API por API Gateway"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"
 
   ApiHealth:
-    Description: "Health check por CloudFront"
-    Value: !Sub "https://${CloudFrontDistribution.DomainName}/api/health"
+    Description: "Health check por API Gateway"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/api/health"
 
   ApiDnsName:
     Description: "DNS público de la EC2"

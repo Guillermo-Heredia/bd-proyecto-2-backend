@@ -5,7 +5,7 @@ contiene **solo el backend y su infraestructura**; el frontend está en
 `bd-proyecto-2-fronted` y se despliega en Amplify.
 
 ```text
-Amplify (React) -> CloudFront -> EC2 (FastAPI :8000) -> RDS PostgreSQL 16
+Amplify (React) -> API Gateway -> EC2 (FastAPI :8000) -> RDS PostgreSQL 16
 ```
 
 ## Estructura
@@ -21,7 +21,7 @@ Amplify (React) -> CloudFront -> EC2 (FastAPI :8000) -> RDS PostgreSQL 16
 │   ├── crear_indices.sql
 │   └── borrar_indices.sql
 └── infra/
-    ├── turbinas.yml        # EC2 + RDS + CloudFront
+    ├── turbinas.yml        # EC2 + RDS + API Gateway
     ├── bootstrap.sh        # se ejecuta en la EC2
     └── README.md           # despliegue paso a paso
 ```
@@ -72,7 +72,7 @@ La guía completa está en [`infra/README.md`](infra/README.md). Resumen:
 3. El user data clona el repo en `/opt/turbinas`, ejecuta
    `infra/bootstrap.sh`, instala Python 3.11, restaura
    `dumps/bd_1m.dump`, crea `app_turbinas` y arranca `turbinas-api`.
-4. Configura Amplify con la URL de CloudFront y actualiza `CORS_ORIGINS` en el
+4. Configura Amplify con la URL de API Gateway y actualiza `CORS_ORIGINS` en el
    `.env` de la EC2.
 
 No hay Nginx ni Docker en AWS. El API corre con Uvicorn y `systemd`.
